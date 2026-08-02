@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Incognito History Vault</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="popup">
+
+  <header class="pop-head">
+    <div class="brand">
+      <img src="icons/icon48.png" alt="" />
+      <div class="brand__text">
+        <h1>Incognito Vault</h1>
+        <p class="muted" id="statusLine">Loading&hellip;</p>
+      </div>
+    </div>
+    <label class="switch" title="Pause or resume recording">
+      <input type="checkbox" id="trackingToggle" />
+      <span class="slider"></span>
+    </label>
+  </header>
+
+  <!-- Shown only when the extension has NOT been granted Incognito access -->
+  <div class="pop-section" id="permBannerWrap" hidden>
+    <div class="banner banner--warn">
+      <span class="banner__icon" aria-hidden="true">&#9888;</span>
+      <div>
+        <strong>Incognito access is off &mdash; nothing is being recorded.</strong>
+        <ol>
+          <li>Open <code>chrome://extensions</code></li>
+          <li>Find <b>Incognito History Vault</b> &rarr; <b>Details</b></li>
+          <li>Enable <b>Allow in Incognito</b></li>
+          <li>Reopen your Incognito window</li>
+        </ol>
+      </div>
+      <button class="btn btn--sm" id="openExtensionsPage" type="button">Open</button>
+    </div>
+  </div>
+
+  <div class="pop-stats">
+    <div class="pop-stat"><b id="statTotal">0</b><span>Stored</span></div>
+    <div class="pop-stat"><b id="stat24h">0</b><span>24 hours</span></div>
+    <div class="pop-stat"><b id="statSites">0</b><span>Sites</span></div>
+  </div>
+
+  <div class="pop-section">
+    <div class="search-inline">
+      <input type="search" id="search" placeholder="Filter recent visits&hellip;" autocomplete="off" spellcheck="false" />
+      <button class="icon-btn" id="clearSearch" type="button" title="Clear filter" hidden>&times;</button>
+    </div>
+  </div>
+
+  <ul class="entry-list" id="list" aria-label="Recent Incognito visits"></ul>
+
+  <footer class="pop-foot">
+    <button class="btn btn--danger btn--sm" id="wipe" type="button" title="Delete every stored entry">Clear data</button>
+    <button class="btn btn--primary" id="openDashboard" type="button">Open dashboard &rarr;</button>
+  </footer>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

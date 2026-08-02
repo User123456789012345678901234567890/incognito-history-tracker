@@ -1,0 +1,462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Incognito History Vault &mdash; Dashboard</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body class="dash">
+
+  <!-- header + tabs stick together as one unit, so no magic offset is needed -->
+  <div class="stickybar">
+  <header class="topbar">
+    <div class="brand">
+      <img src="icons/icon128.png" alt="" />
+      <div class="brand__text">
+        <h1>Incognito History Vault</h1>
+        <p class="muted tiny">Local-only record of Incognito browsing</p>
+      </div>
+    </div>
+
+    <div class="topbar__meta">
+      <span id="metaStatus" class="badge badge--flat">&hellip;</span>
+      <span><b id="metaTotal">0</b> entries</span>
+      <span><b id="metaDomains">0</b> domains</span>
+      <span><b id="metaStorage">0 KB</b> stored</span>
+      <span>retention: <b id="metaRetention">&mdash;</b></span>
+    </div>
+
+    <div class="topbar__actions">
+      <div class="dropdown" id="exportDropdown">
+        <button class="btn" id="exportBtn" type="button" aria-haspopup="true" aria-expanded="false">
+          &#8681; Export
+        </button>
+        <div class="dropdown__menu" id="exportMenu" hidden>
+          <button class="dropdown__item" data-export="json" type="button">
+            JSON <small>Full fidelity: entries, tab sessions, settings</small>
+          </button>
+          <button class="dropdown__item" data-export="csv" type="button">
+            CSV <small>Spreadsheet friendly, one row per visit</small>
+          </button>
+          <button class="dropdown__item" data-export="ndjson" type="button">
+            NDJSON <small>One JSON object per line, stream friendly</small>
+          </button>
+          <button class="dropdown__item" data-export="filtered" type="button">
+            CSV (current filter) <small>Only what the search below matched</small>
+          </button>
+        </div>
+      </div>
+      <button class="btn btn--ghost" id="refreshBtn" type="button" title="Reload from storage">&#10227;</button>
+      <button class="btn btn--danger" id="nukeTopBtn" type="button">&#9760; Nuke</button>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab" role="tab" id="tab-vault" aria-controls="view-vault" aria-selected="true">&#128194; Vault</button>
+    <button class="tab" role="tab" id="tab-analytics" aria-controls="view-analytics" aria-selected="false">&#128202; Analytics</button>
+    <button class="tab" role="tab" id="tab-privacy" aria-controls="view-privacy" aria-selected="false">&#128274; Privacy &amp; Setup</button>
+  </nav>
+  </div>
+
+  <!-- ===================================================== VAULT / SEARCH -->
+  <main class="view" id="view-vault" role="tabpanel" aria-labelledby="tab-vault">
+
+    <div class="banner banner--warn" id="permBanner" hidden>
+      <span class="banner__icon" aria-hidden="true">&#9888;</span>
+      <div>
+        <strong>This extension is not allowed in Incognito, so nothing is being recorded.</strong>
+        <p class="small muted">Open the <b>Privacy &amp; Setup</b> tab for the one-time, four-step fix.</p>
+      </div>
+      <button class="btn btn--sm" id="permBannerFix" type="button">Fix it</button>
+    </div>
+
+    <section class="panel search-panel">
+      <div class="search-panel__row">
+        <div class="search-inline">
+          <input type="search" id="query" placeholder="Search your Incognito history&hellip;" autocomplete="off" spellcheck="false" />
+          <button class="icon-btn" id="queryClear" type="button" title="Clear search" hidden>&times;</button>
+        </div>
+        <div class="toolbar">
+          <label class="checkline" title="Match upper/lower case exactly">
+            <input type="checkbox" id="caseSensitive" /> Case sensitive
+          </label>
+        </div>
+      </div>
+
+      <div class="search-panel__row" style="grid-template-columns: 1fr;">
+        <div class="segmented" id="modeGroup" role="radiogroup" aria-label="Search algorithm">
+          <div class="mode">
+            <label><input type="radio" name="mode" value="normal" checked /><span>Normal</span></label>
+            <span class="info" tabindex="0" role="note"
+              data-tip="NORMAL — literal substring match.&#10;The query is used exactly as typed (no wildcards, no special characters). Fastest and most predictable.&#10;Example: “github.com/pulls” matches only URLs containing that exact text.">i</span>
+          </div>
+          <div class="mode">
+            <label><input type="radio" name="mode" value="fuzzy" /><span>Fuzzy</span></label>
+            <span class="info" tabindex="0" role="note"
+              data-tip="FUZZY — approximate match, tolerant of typos and partial words.&#10;Combines subsequence matching (“gthb” finds “github”) with edit-distance scoring (“stckoverflow” finds “stackoverflow”).&#10;Results are ranked; switch Sort to “Relevance” to see the best hits first.">i</span>
+          </div>
+          <div class="mode">
+            <label><input type="radio" name="mode" value="regex" /><span>Regex</span></label>
+            <span class="info" tabindex="0" role="note"
+              data-tip="REGEX — full JavaScript regular expressions.&#10;Invalid patterns are caught and reported inline instead of crashing the page. The “i” flag is applied unless Case sensitive is ticked.&#10;Example: ^https://(mail|drive)\.google\.com">i</span>
+          </div>
+          <div class="mode">
+            <label><input type="radio" name="mode" value="mixed" /><span>Mixed</span></label>
+            <span class="info" tabindex="0" role="note"
+              data-tip="MIXED — structured query language combining domain and text search.&#10;• domain:github.com or site:github.com → host filter&#10;• &quot;exact phrase&quot; → quoted literal&#10;• /^regex$/ → inline regular expression&#10;• -word → exclude&#10;• anything else → free-text term&#10;All parts are AND-ed together.">i</span>
+          </div>
+        </div>
+      </div>
+
+      <p class="small muted" id="modeHint"></p>
+
+      <details class="disclosure" id="regexGuide">
+        <summary>&#128214; Regex quick guide &amp; cheat sheet</summary>
+        <div class="disclosure__body">
+          <p class="small muted">Patterns are tested against the field selected below. Anchors refer to the start/end of that whole field.</p>
+          <div class="cheats">
+            <div class="cheat"><code>^example</code><span>Field <b>starts with</b> “example”</span></div>
+            <div class="cheat"><code>\.pdf$</code><span>Field <b>ends with</b> “.pdf” (backslash escapes the dot)</span></div>
+            <div class="cheat"><code>.*</code><span>Any characters, any length (<code>.</code> = one char, <code>*</code> = zero or more)</span></div>
+            <div class="cheat"><code>.+</code><span>Any characters, at least one</span></div>
+            <div class="cheat"><code>a|b</code><span>Either alternative: <code>mail|drive</code></span></div>
+            <div class="cheat"><code>(...)</code><span>Group things together: <code>^https://(www\.)?bbc</code></span></div>
+            <div class="cheat"><code>[0-9]</code><span>Character class — any digit; <code>[a-z]</code> any lowercase letter</span></div>
+            <div class="cheat"><code>[^/]+</code><span>One or more characters that are <b>not</b> “/”</span></div>
+            <div class="cheat"><code>\d{4}</code><span>Exactly four digits; <code>{2,5}</code> means two to five</span></div>
+            <div class="cheat"><code>\?</code><span>Escaped literal “?” (also escape <code>. + * $ ^ ( ) [ ] { } | \ /</code>)</span></div>
+            <div class="cheat"><code>\bnews\b</code><span>Whole word “news”, not “newspaper”</span></div>
+            <div class="cheat"><code>(?!)</code><span>Lookahead: <code>^(?!.*login).*$</code> = does not contain “login”</span></div>
+          </div>
+          <div class="toolbar" style="margin-top:12px">
+            <span class="small faint">Try one:</span>
+            <button class="btn btn--sm" data-recipe="^https://(?!.*google)" type="button">Non-Google pages</button>
+            <button class="btn btn--sm" data-recipe="\.(pdf|zip|docx?)($|\?)" type="button">Downloads</button>
+            <button class="btn btn--sm" data-recipe="(login|signin|auth)" type="button">Auth pages</button>
+            <button class="btn btn--sm" data-recipe="^https?://[^/]*\.(io|dev|sh)/" type="button">Dev TLDs</button>
+          </div>
+        </div>
+      </details>
+
+      <div class="search-panel__filters">
+        <label class="field">
+          <span>Search in</span>
+          <select id="field">
+            <option value="all">Title + URL + domain</option>
+            <option value="title">Title only</option>
+            <option value="url">URL only</option>
+            <option value="domain">Domain only</option>
+          </select>
+        </label>
+        <label class="field">
+          <span>Domain</span>
+          <select id="domainFilter"><option value="">All domains</option></select>
+        </label>
+        <label class="field">
+          <span>From</span>
+          <input type="date" id="dateFrom" />
+        </label>
+        <label class="field">
+          <span>To</span>
+          <input type="date" id="dateTo" />
+        </label>
+        <label class="field">
+          <span>Sort</span>
+          <select id="sort">
+            <option value="newest">Newest first</option>
+            <option value="oldest">Oldest first</option>
+            <option value="relevance">Relevance</option>
+            <option value="dwell">Longest time on page</option>
+            <option value="domain">Domain A&rarr;Z</option>
+          </select>
+        </label>
+      </div>
+
+      <div class="search-status">
+        <span id="resultCount" class="badge">0 results</span>
+        <span id="searchMeta" class="small muted"></span>
+        <span id="searchError" class="err"></span>
+        <span class="spacer"></span>
+        <button class="btn btn--sm btn--ghost" id="resetFilters" type="button">Reset filters</button>
+      </div>
+    </section>
+
+    <section class="panel panel--tight">
+      <div class="toolbar" id="selectionBar" style="margin-bottom:10px">
+        <label class="checkline"><input type="checkbox" id="selectAll" /> Select all matches</label>
+        <span class="badge badge--flat" id="selectionCount">0 selected</span>
+        <button class="btn btn--sm btn--danger" id="deleteSelected" type="button" disabled>Delete selected</button>
+        <button class="btn btn--sm btn--ghost" id="clearSelection" type="button" disabled>Clear selection</button>
+      </div>
+
+      <div class="table-wrap">
+        <table class="table" id="resultsTable">
+          <thead>
+            <tr>
+              <th class="col-check"></th>
+              <th class="col-time sortable" data-sort-key="newest">Visited</th>
+              <th>Page</th>
+              <th class="col-domain sortable" data-sort-key="domain">Domain</th>
+              <th class="col-dwell sortable" data-sort-key="dwell">On page</th>
+              <th class="col-actions"></th>
+            </tr>
+          </thead>
+          <tbody id="resultsBody"></tbody>
+        </table>
+      </div>
+
+      <div id="resultsEmpty" class="empty" hidden>
+        <div class="empty__icon">&#9906;</div>
+        <div>Nothing to show yet.</div>
+        <div class="small faint" id="resultsEmptyHint"></div>
+      </div>
+
+      <div class="toolbar" style="justify-content:center;margin-top:12px">
+        <button class="btn btn--sm" id="loadMore" type="button" hidden>Load more</button>
+      </div>
+    </section>
+  </main>
+
+  <!-- ======================================================== ANALYTICS -->
+  <main class="view" id="view-analytics" role="tabpanel" aria-labelledby="tab-analytics" hidden>
+
+    <div class="grid grid--4">
+      <div class="stat"><span class="stat__label">Visits logged</span><b class="stat__value" id="aVisits">0</b><span class="stat__hint" id="aVisitsHint">&mdash;</span></div>
+      <div class="stat"><span class="stat__label">Unique domains</span><b class="stat__value" id="aDomains">0</b><span class="stat__hint" id="aDomainsHint">&mdash;</span></div>
+      <div class="stat"><span class="stat__label">Peak hour</span><b class="stat__value" id="aPeak">&mdash;</b><span class="stat__hint" id="aPeakHint">&mdash;</span></div>
+      <div class="stat"><span class="stat__label">Median time on page</span><b class="stat__value" id="aDwell">&mdash;</b><span class="stat__hint" id="aDwellHint">&mdash;</span></div>
+    </div>
+
+    <div class="grid grid--2">
+      <section class="panel">
+        <div class="panel__head">
+          <h3>Most visited domains
+            <span class="info" tabindex="0" role="note" data-tip="Stored log count grouped by host, with “www.” stripped. Percentages are of all logged visits.">i</span>
+          </h3>
+          <span class="spacer"></span>
+          <select id="domainTopN" style="width:auto">
+            <option value="10">Top 10</option>
+            <option value="20">Top 20</option>
+            <option value="50">Top 50</option>
+          </select>
+        </div>
+        <div class="barlist" id="domainBars"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head">
+          <h3>Busiest days
+            <span class="info" tabindex="0" role="note" data-tip="Calendar days ranked by number of Incognito page loads recorded.">i</span>
+          </h3>
+        </div>
+        <div class="barlist" id="dayBars"></div>
+      </section>
+    </div>
+
+    <section class="panel">
+      <div class="panel__head">
+        <h3>Incognito activity by hour of day
+          <span class="info" tabindex="0" role="note" data-tip="Every logged visit bucketed into the local-time hour it happened. The gold column is your peak hour.">i</span>
+        </h3>
+        <span class="spacer"></span>
+        <span class="small faint" id="hourSummary"></span>
+      </div>
+      <div class="chart" id="hourChart"></div>
+    </section>
+
+    <div class="grid grid--2">
+      <section class="panel">
+        <div class="panel__head"><h3>Activity by weekday</h3></div>
+        <div class="chart" id="weekdayChart"></div>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head"><h3>Volume over the last 14 days</h3></div>
+        <div class="chart" id="dailyChart"></div>
+      </section>
+    </div>
+
+    <section class="panel">
+      <div class="panel__head">
+        <h3>Weekday &times; hour heat map
+          <span class="info" tabindex="0" role="note" data-tip="Darker cell = fewer visits, brighter violet = more. Rows are weekdays, columns are hours 0-23 in local time.">i</span>
+        </h3>
+      </div>
+      <div class="heat" id="heatGrid"></div>
+      <div class="heat-legend">
+        <span>less</span>
+        <i style="background:var(--surface-2)"></i>
+        <i style="background:rgba(140,116,255,.3)"></i>
+        <i style="background:rgba(140,116,255,.6)"></i>
+        <i style="background:rgba(140,116,255,.85)"></i>
+        <i style="background:#8c74ff"></i>
+        <span>more</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel__head">
+        <h3>Session duration tracker
+          <span class="info" tabindex="0" role="note" data-tip="How long each Incognito tab stayed open: measured from its first recorded navigation until the tab was closed. Tabs that are still open are not listed yet.">i</span>
+        </h3>
+        <span class="spacer"></span>
+        <span class="small faint" id="sessionNote"></span>
+      </div>
+
+      <div class="grid grid--4" style="margin-bottom:14px">
+        <div class="stat"><span class="stat__label">Tabs tracked</span><b class="stat__value" id="sCount">0</b><span class="stat__hint">closed Incognito tabs</span></div>
+        <div class="stat"><span class="stat__label">Average tab life</span><b class="stat__value" id="sAvg">&mdash;</b><span class="stat__hint">mean open duration</span></div>
+        <div class="stat"><span class="stat__label">Median tab life</span><b class="stat__value" id="sMedian">&mdash;</b><span class="stat__hint">50th percentile</span></div>
+        <div class="stat"><span class="stat__label">Longest tab life</span><b class="stat__value" id="sMax">&mdash;</b><span class="stat__hint" id="sMaxHint">&mdash;</span></div>
+      </div>
+
+      <div class="table-wrap">
+        <table class="table">
+          <thead>
+            <tr>
+              <th class="col-time">Opened</th>
+              <th class="col-time">Closed</th>
+              <th class="col-dwell">Duration</th>
+              <th>Started at</th>
+              <th class="col-dwell">Pages</th>
+            </tr>
+          </thead>
+          <tbody id="sessionBody"></tbody>
+        </table>
+      </div>
+      <div id="sessionEmpty" class="empty" hidden>
+        <div class="empty__icon">&#9201;</div>
+        <div>No completed tab sessions yet.</div>
+        <div class="small faint">Close an Incognito tab and it will appear here.</div>
+      </div>
+    </section>
+  </main>
+
+  <!-- ==================================================== PRIVACY / SETUP -->
+  <main class="view" id="view-privacy" role="tabpanel" aria-labelledby="tab-privacy" hidden>
+
+    <section class="panel">
+      <div class="panel__head"><h3>&#9881;&#65039; Setup &mdash; allow the extension in Incognito</h3></div>
+      <div class="banner banner--info" id="setupBanner">
+        <span class="banner__icon" aria-hidden="true">&#8505;</span>
+        <div>
+          <p id="setupState"><b>Checking permission&hellip;</b></p>
+          <p class="small muted" style="margin-top:6px">
+            Chrome hides Incognito windows from extensions by default. This is a one-time manual toggle
+            that only you can grant &mdash; an extension can never enable it for itself.
+          </p>
+          <ol>
+            <li>Go to <code>chrome://extensions</code></li>
+            <li>Locate <b>Incognito History Vault</b> and click <b>Details</b></li>
+            <li>Switch on <b>Allow in Incognito</b></li>
+            <li>Close and reopen your Incognito windows so the service worker attaches to them</li>
+          </ol>
+        </div>
+        <button class="btn btn--sm" id="openExtPage" type="button">Open page</button>
+      </div>
+      <p class="small faint" style="margin-top:10px">
+        The manifest uses <code>"incognito": "spanning"</code>, so a single service worker and a single
+        storage area serve both profiles. That is what lets your Incognito log survive after the
+        Incognito window closes.
+      </p>
+    </section>
+
+    <div class="grid grid--2">
+      <section class="panel">
+        <div class="panel__head"><h3>&#128465;&#65039; Auto-delete retention</h3></div>
+        <p class="small muted" style="margin-bottom:12px">
+          Entries older than the window are removed automatically (checked every 30 minutes, on browser
+          start, and whenever you change this setting).
+        </p>
+        <div class="grid" style="gap:9px">
+          <label class="checkline"><input type="radio" name="retention" value="1d" /> Keep for <b>1 day</b></label>
+          <label class="checkline"><input type="radio" name="retention" value="7d" /> Keep for <b>7 days</b></label>
+          <label class="checkline"><input type="radio" name="retention" value="forever" /> <b>Keep forever</b> (until you delete it)</label>
+        </div>
+        <div class="toolbar" style="margin-top:14px">
+          <button class="btn btn--sm" id="purgeNow" type="button">Run cleanup now</button>
+          <span class="small faint" id="retentionHint"></span>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head"><h3>&#127909; Recording</h3></div>
+        <div class="grid" style="gap:12px">
+          <label class="switch">
+            <input type="checkbox" id="trackingSwitch" />
+            <span class="slider"></span>
+            <span>Record Incognito navigation</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" id="spaSwitch" />
+            <span class="slider"></span>
+            <span>Also record in-page route changes (SPA)</span>
+          </label>
+          <label class="field" style="max-width:220px">
+            <span>Maximum stored entries</span>
+            <input type="number" id="maxEntries" min="100" max="100000" step="100" />
+          </label>
+          <p class="small faint">Oldest entries are trimmed first once the cap is reached.</p>
+        </div>
+      </section>
+    </div>
+
+    <div class="grid grid--2">
+      <section class="panel">
+        <div class="panel__head"><h3>&#128190; Storage usage</h3></div>
+        <div class="usage"><div class="usage__fill" id="usageFill"></div></div>
+        <p class="small muted" style="margin-top:8px" id="usageText">&mdash;</p>
+        <p class="small faint" style="margin-top:6px">
+          Everything lives in <code>chrome.storage.local</code> on this machine. Nothing is uploaded,
+          synced or sent anywhere &mdash; the extension declares no remote hosts and makes no network requests.
+        </p>
+      </section>
+
+      <section class="panel">
+        <div class="panel__head"><h3>&#9986; Targeted deletion</h3></div>
+        <label class="field" style="max-width:240px">
+          <span>Delete everything before</span>
+          <input type="date" id="deleteBefore" />
+        </label>
+        <div class="toolbar" style="margin-top:12px">
+          <button class="btn btn--sm btn--danger" id="deleteBeforeBtn" type="button" disabled>Delete older entries</button>
+        </div>
+      </section>
+    </div>
+
+    <section class="panel" style="border-color:rgba(255,107,125,.3)">
+      <div class="panel__head"><h3 style="color:var(--danger)">&#9760; Nuke everything</h3></div>
+      <p class="small muted">
+        Instantly and irreversibly clears the entire vault: every logged visit, every tab session and all
+        in-memory tab bookkeeping. Your preferences on this page are kept.
+      </p>
+      <div class="toolbar" style="margin-top:14px">
+        <button class="btn btn--danger" id="nukeBtn" type="button">Nuke local storage</button>
+        <span class="small faint">There is no undo and no backup &mdash; export first if you want a copy.</span>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel__head"><h3>&#9888;&#65039; What this extension actually does</h3></div>
+      <p class="small muted">
+        By design this tool makes Incognito browsing <b>persistent</b>, which is the opposite of what
+        Incognito normally guarantees. Anyone with access to this Chrome profile can read the vault.
+        Only install it on a browser you own, and tell the other people who use this computer that it
+        is running &mdash; a private-browsing session that is silently logged is a nasty surprise.
+        Use the retention setting or the nuke button to keep the window of stored data small.
+      </p>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <span>Incognito History Vault v1.0.0</span>
+    <span>Manifest V3 &middot; <code class="mono">incognito: spanning</code></span>
+    <span>No network access &middot; no analytics &middot; no remote code</span>
+  </footer>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>
