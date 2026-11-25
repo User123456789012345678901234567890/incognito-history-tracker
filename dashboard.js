@@ -1162,6 +1162,115 @@ async function runExport(kind) {
   }
 }
 
+/* ---------------------------------------------------------- import (v1.0.2) */
+
+/** Minimal RFC 4180 CSV reader (quoted fields, "" escapes, CRLF or LF). */
+function parseCsv(text) {
+  const rows = [];
+  let row = [];
+  let cell = '';
+  let quoted = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quoted) {
+      if (ch === '"' && text[i + 1] === '"') { cell += '"'; i += 1; }
+      else if (ch === '"') quoted = false;
+      else cell += ch;
+    } else if (ch === '"') quoted = true;
+    else if (ch === ',') { row.push(cell); cell = ''; }
+    else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i += 1;
+      row.push(cell); rows.push(row); row = []; cell = '';
+    } else cell += ch;
+  }
+  if (cell || row.length) { row.push(cell); rows.push(row); }
+  return rows.filter((r) => r.some((c) => c !== ''));
+}
+
+/** Turns one CSV export row back into an entry (undoes csvCell's formula guard). */
+function entryFromCsv(header, cells) {
+  const get = (name) => {
+    const at = header.indexOf(name);
+    const value = at === -1 ? '' : (cells[at] || '');
+    return /^'[=+\-@\t\r]/.test(value) ? value.slice(1) : value;
+  };
+  const epoch = Number(get('epoch_ms'));
+  return {
+    id: get('id'),
+    ts: Number.isFinite(epoch) && epoch > 0 ? epoch : Date.parse(get('visited_at')),
+    domain: get('domain'),
+    title: get('title'),
+    url: get('url'),
+    transition: get('transition'),
+    kind: get('kind'),
+    dwellMs: Number(get('time_on_page_ms')) || 0,
+    tabId: Number(get('tab_id'))
+  };
+}
+
+/** Reads any file produced by runExport(). Returns { entries, sessions }. */
+function parseImport(name, text) {
+  const trimmed = text.replace(/^\uFEFF/, '').trim();
+  if (!trimmed) throw new Error('The file is empty.');
+
+  if (/\.csv$/i.test(name) || /^id,visited_at,/.test(trimmed)) {
+    const rows = parseCsv(trimmed);
+    const header = rows.shift() || [];
+    if (!header.includes('url')) throw new Error('This CSV has no "url" column, so it is not a vault export.');
+    return { entries: rows.map((cells) => entryFromCsv(header, cells)), sessions: [] };
+  }
+
+  // Whole-file JSON: the full JSON export, a bare array, or a one-line NDJSON.
+  let whole = null;
+  try {
+    whole = JSON.parse(trimmed);
+  } catch {
+    // not one JSON document: treat as NDJSON below
+  }
+  if (Array.isArray(whole)) return { entries: whole, sessions: [] };
+  if (whole && Array.isArray(whole.entries)) {
+    return { entries: whole.entries, sessions: Array.isArray(whole.sessions) ? whole.sessions : [] };
+  }
+  if (whole && whole.url) return { entries: [whole], sessions: [] };
+  if (whole) throw new Error('This JSON file is not a vault export.');
+
+  const entries = trimmed.split(/\r?\n/).filter((l) => l.trim()).map((line, i) => {
+    try {
+      return JSON.parse(line);
+    } catch {
+      throw new Error(`Line ${i + 1} is not valid JSON.`);
+    }
+  });
+  return { entries, sessions: [] };
+}
+
+async function runImport(file) {
+  if (!file) return;
+  try {
+    if (file.size > 50 * 1024 * 1024) throw new Error('File is larger than 50 MB.');
+    const parsed = parseImport(file.name, await file.text());
+    if (!parsed.entries.length) throw new Error('No visits found in that file.');
+
+    const ok = await confirmModal({
+      title: `Import ${parsed.entries.length.toLocaleString()} visits?`,
+      body: `"${file.name}" will be merged into the vault${parsed.sessions.length ? ` together with ${parsed.sessions.length.toLocaleString()} tab sessions` : ''}. Visits already stored are skipped, nothing is deleted and your settings are not changed. Retention and the entry cap still apply afterwards.`,
+      confirmText: 'Import'
+    });
+    if (!ok) return;
+
+    const result = await send('importData', parsed);
+    await loadData();
+    const parts = [`Imported ${result.added.toLocaleString()} visits`];
+    if (result.duplicates) parts.push(`${result.duplicates.toLocaleString()} already stored`);
+    if (result.invalid) parts.push(`${result.invalid.toLocaleString()} invalid skipped`);
+    if (result.trimmed) parts.push(`${result.trimmed.toLocaleString()} oldest trimmed by the cap`);
+    if (result.expired) parts.push(`${result.expired.toLocaleString()} past the retention window removed`);
+    toast(parts.join(', '));
+  } catch (err) {
+    toast(`Import failed: ${err.message}`, 'err');
+  }
+}
+
 /* ========================================================================== */
 /* 8. bootstrap                                                               */
 /* ========================================================================== */
@@ -1341,6 +1450,14 @@ function wireEvents() {
       menu.hidden = true;
       $('exportBtn').setAttribute('aria-expanded', 'false');
     }
+  });
+
+  /* --- import (v1.0.2) ---------------------------------------------- */
+  $('importBtn').addEventListener('click', () => $('importFile').click());
+  $('importFile').addEventListener('change', async (event) => {
+    const [file] = event.target.files;
+    event.target.value = '';   // allow picking the same file again
+    await runImport(file);
   });
 
   $('refreshBtn').addEventListener('click', async () => {

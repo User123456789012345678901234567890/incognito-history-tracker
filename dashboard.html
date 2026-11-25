@@ -47,6 +47,8 @@
           </button>
         </div>
       </div>
+      <button class="btn" id="importBtn" type="button" title="Merge a JSON, NDJSON or CSV export back into the vault">&#8679; Import</button>
+      <input type="file" id="importFile" accept=".json,.ndjson,.jsonl,.csv,application/json,text/csv" hidden />
       <button class="btn btn--ghost" id="refreshBtn" type="button" title="Reload from storage">&#10227;</button>
       <button class="btn btn--danger" id="nukeTopBtn" type="button">&#9760; Nuke</button>
     </div>
@@ -450,7 +452,7 @@
   </main>
 
   <footer class="footer">
-    <span>Incognito History Vault v1.0.1</span>
+    <span>Incognito History Vault v1.0.2</span>
     <span>Manifest V3 &middot; <code class="mono">incognito: spanning</code></span>
     <span>No network access &middot; no analytics &middot; no remote code</span>
   </footer>
