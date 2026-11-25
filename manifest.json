@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Incognito History Vault",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Locally records, searches and analyses browsing activity that happens in Incognito windows. Nothing ever leaves your machine.",
   "minimum_chrome_version": "102",
 
@@ -40,6 +40,13 @@
   },
 
   "options_page": "dashboard.html",
+
+  "commands": {
+    "reopen-last-closed": {
+      "suggested_key": { "default": "Alt+Shift+T" },
+      "description": "Reopen the last closed Incognito tab or window"
+    }
+  },
 
   "content_security_policy": {
     "extension_pages": "script-src 'self'; object-src 'self'"
