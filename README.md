@@ -10,6 +10,16 @@ A Chrome extension (Manifest V3) that keeps a local, searchable history of what 
 
 ## Changelog
 
+### v1.0.2
+
+**Import**
+
+- The dashboard has a new **Import** button next to **Export**. It reads any file the extension exports: JSON (full backup with tab sessions), NDJSON or CSV.
+- Imported visits are merged into the vault. Visits already stored are skipped, nothing is deleted, and your settings are not changed.
+- Every imported record is checked first. Rows with a missing or non-web URL or a bad timestamp are skipped and counted.
+- The entry cap and the retention setting apply right after the import, and a message shows how many visits were added, skipped or removed.
+- Version bumped to 1.0.2.
+
 ### v1.0.1
 
 **Reopen closed Incognito tabs and windows**
@@ -28,7 +38,6 @@ A Chrome extension (Manifest V3) that keeps a local, searchable history of what 
 
 **Other**
 
-- Version bumped to 1.0.1 (`manifest.json` and the dashboard footer).
 - No new permissions.
 
 ### v1.0.0

@@ -765,6 +765,101 @@ const handlers = {
     });
   },
 
+  /**
+   * Merges an export back into the vault (v1.0.2). Every field is rebuilt
+   * from validated input, so a hand-edited or foreign file cannot store
+   * odd shapes. Existing entries win; nothing is deleted except by the cap.
+   */
+  async importData({ entries, sessions } = {}) {
+    if (!Array.isArray(entries)) throw new Error('Import has no entries list.');
+    const settings = await getSettings();
+
+    const result = await enqueue(async () => {
+      const [log, spans] = await Promise.all([getLog(), getSpans()]);
+      const ids = new Set(log.map((e) => e.id));
+      const seen = new Set(log.map((e) => `${e.url}|${e.ts}`));
+      const str = (v, max = 4096) => (typeof v === 'string' ? v.slice(0, max) : '');
+      const num = (v, fallback) => (Number.isFinite(Number(v)) && v !== '' && v !== null ? Number(v) : fallback);
+      let invalid = 0;
+      let duplicates = 0;
+      const added = [];
+
+      for (const raw of entries) {
+        const url = raw && str(raw.url, 8192);
+        const ts = raw ? num(raw.ts, NaN) : NaN;
+        if (!isTrackableUrl(url) || !Number.isFinite(ts) || ts <= 0 || ts > Date.now() + 86400000) {
+          invalid += 1;
+          continue;
+        }
+        let id = str(raw.id, 100);
+        if ((id && ids.has(id)) || seen.has(`${url}|${ts}`)) {
+          duplicates += 1;
+          continue;
+        }
+        if (!id) id = makeId();
+        ids.add(id);
+        seen.add(`${url}|${ts}`);
+        const date = new Date(ts);
+        added.push({
+          id,
+          url,
+          domain: domainOf(url),
+          path: pathOf(url),
+          title: str(raw.title, 1024),
+          favIconUrl: '',
+          ts,
+          hour: date.getHours(),
+          weekday: date.getDay(),
+          tabId: num(raw.tabId, -1),
+          windowId: num(raw.windowId, -1),
+          transition: str(raw.transition, 40) || 'link',
+          kind: raw.kind === 'spa' ? 'spa' : 'load',
+          dwellMs: Math.max(0, num(raw.dwellMs, 0)),
+          incognito: true
+        });
+      }
+
+      const merged = log.concat(added).sort((a, b) => a.ts - b.ts);
+      const cap = Number(settings.maxEntries) || DEFAULT_SETTINGS.maxEntries;
+      const trimmed = Math.max(0, merged.length - cap);
+      if (trimmed) merged.splice(0, trimmed);
+
+      // Tab sessions (JSON export only): same idea, keyed by id.
+      const spanIds = new Set(spans.map((s) => s.id));
+      let spansAdded = 0;
+      for (const raw of Array.isArray(sessions) ? sessions : []) {
+        const startedAt = raw ? num(raw.startedAt, NaN) : NaN;
+        const endedAt = raw ? num(raw.endedAt, NaN) : NaN;
+        if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt) || endedAt < startedAt) continue;
+        const id = str(raw.id, 100) || makeId();
+        if (spanIds.has(id)) continue;
+        spanIds.add(id);
+        const firstUrl = str(raw.firstUrl, 8192);
+        spans.push({
+          id,
+          tabId: num(raw.tabId, -1),
+          startedAt,
+          endedAt,
+          durationMs: endedAt - startedAt,
+          views: Math.max(1, num(raw.views, 1)),
+          firstUrl,
+          domain: domainOf(firstUrl),
+          lastUrl: str(raw.lastUrl, 8192)
+        });
+        spansAdded += 1;
+      }
+      spans.sort((a, b) => a.endedAt - b.endedAt);
+      if (spans.length > MAX_SPANS) spans.splice(0, spans.length - MAX_SPANS);
+
+      await chrome.storage.local.set({ [LOG_KEY]: merged, [SPANS_KEY]: spans });
+      await refreshBadge(merged);
+      return { added: added.length, duplicates, invalid, trimmed, sessionsAdded: spansAdded, total: merged.length };
+    });
+    // Imported visits older than the retention window go right away.
+    const { removed } = await applyRetention();
+    return { ...result, expired: removed || 0 };
+  },
+
   /* ---- recently closed (v1.0.1) ---- */
 
   async getClosed() {
