@@ -24,13 +24,24 @@ const els = {
   list: document.getElementById('list'),
   wipe: document.getElementById('wipe'),
   openDashboard: document.getElementById('openDashboard'),
-  toasts: document.getElementById('toasts')
+  toasts: document.getElementById('toasts'),
+  // v1.0.1: tab bar + recently closed view
+  tabs: [document.getElementById('tab-history'), document.getElementById('tab-closed')],
+  closedCount: document.getElementById('closedCount'),
+  closedList: document.getElementById('closedList'),
+  reopenLast: document.getElementById('reopenLast'),
+  clearClosed: document.getElementById('clearClosed'),
+  shortcutHint: document.getElementById('shortcutHint')
 };
+
+const GROUP_PREVIEW = 6;    // tabs shown per closed window before "+N more"
 
 let entries = [];
 let state = null;
 let wipeArmed = false;
 let wipeTimer = null;
+let closedRecords = [];
+const showAllGroups = new Set();
 
 /* ------------------------------------------------------------------ utils */
 
@@ -243,6 +254,193 @@ function renderHeader() {
   }
 }
 
+/* ------------------------------------------------- recently closed (v1.0.1) */
+
+function tabCount(record) {
+  return record.windows.reduce((n, w) => n + w.tabs.length, 0);
+}
+
+function groupLabel(record) {
+  const tabs = tabCount(record);
+  const tabWord = `${tabs} tab${tabs === 1 ? '' : 's'}`;
+  if (record.kind === 'session') {
+    return `Browser quit \u00b7 ${tabWord}`;
+  }
+  return `Window \u00b7 ${tabWord}`;
+}
+
+async function reopen(payload) {
+  try {
+    await send('reopenClosed', payload);
+    // A new window steals focus and closes the popup; otherwise the list
+    // refreshes through storage.onChanged.
+  } catch (err) {
+    toast(err.message, 'err');
+    refreshClosed();
+  }
+}
+
+/** One clickable tab row, styled like a history entry. */
+function closedTabRow(tab, timeTs, onActivate) {
+  const li = document.createElement('li');
+  li.className = 'entry';
+  li.tabIndex = 0;
+  li.title = tab.url;
+  li.setAttribute('role', 'link');
+
+  const body = document.createElement('div');
+  body.className = 'entry__body';
+  const title = document.createElement('div');
+  title.className = 'entry__title';
+  title.textContent = tab.title || tab.domain || tab.url;
+  const meta = document.createElement('div');
+  meta.className = 'entry__meta';
+  meta.textContent = tab.domain || tab.url;
+  body.append(title, meta);
+
+  const time = document.createElement('div');
+  time.className = 'entry__time';
+  if (timeTs) {
+    time.textContent = relativeTime(timeTs);
+    time.title = new Date(timeTs).toLocaleString();
+  }
+
+  li.append(initialTile(tab.domain), body, time);
+  li.addEventListener('click', onActivate);
+  li.addEventListener('keydown', (event) => {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      onActivate();
+    }
+  });
+  return li;
+}
+
+function closedGroup(record) {
+  const li = document.createElement('li');
+  li.className = 'closed-group';
+
+  const head = document.createElement('div');
+  head.className = 'closed-group__head';
+  const title = document.createElement('div');
+  title.className = 'closed-group__title';
+  title.textContent = groupLabel(record);
+  const wins = record.windows.length;
+  title.title = `${wins} window${wins === 1 ? '' : 's'}, closed ${new Date(record.closedAt).toLocaleString()}`;
+  const time = document.createElement('div');
+  time.className = 'entry__time';
+  time.textContent = relativeTime(record.closedAt);
+  time.title = new Date(record.closedAt).toLocaleString();
+  const restore = document.createElement('button');
+  restore.type = 'button';
+  restore.className = 'btn btn--sm';
+  restore.textContent = record.kind === 'session' ? 'Restore all' : 'Restore window';
+  restore.title = 'Reopen every tab in Incognito';
+  restore.addEventListener('click', () => reopen({ id: record.id }));
+  head.append(title, time, restore);
+
+  const list = document.createElement('ul');
+  list.className = 'closed-group__tabs';
+  const expanded = showAllGroups.has(record.id);
+  let shown = 0;
+  record.windows.forEach((win, windowIndex) => {
+    win.tabs.forEach((tab, tabIndex) => {
+      if (!expanded && shown >= GROUP_PREVIEW) return;
+      shown += 1;
+      list.appendChild(closedTabRow(tab, null, () => reopen({ id: record.id, windowIndex, tabIndex })));
+    });
+  });
+
+  li.append(head, list);
+
+  const hiddenCount = tabCount(record) - shown;
+  if (hiddenCount > 0) {
+    const more = document.createElement('button');
+    more.type = 'button';
+    more.className = 'btn btn--ghost btn--sm closed-more';
+    more.textContent = `+ ${hiddenCount} more`;
+    more.addEventListener('click', () => {
+      showAllGroups.add(record.id);
+      renderClosed();
+    });
+    li.appendChild(more);
+  }
+  return li;
+}
+
+function renderClosed() {
+  const count = closedRecords.length;
+  els.closedCount.hidden = count === 0;
+  els.closedCount.textContent = String(count);
+  els.reopenLast.disabled = count === 0;
+  els.clearClosed.disabled = count === 0;
+  els.closedList.textContent = '';
+
+  if (!count) {
+    const li = document.createElement('li');
+    li.className = 'empty';
+    const icon = document.createElement('div');
+    icon.className = 'empty__icon';
+    icon.textContent = '\u21BA';
+    const text = document.createElement('div');
+    text.className = 'small';
+    if (state && state.incognitoAllowed === false) {
+      text.textContent = 'Grant Incognito access to start recording.';
+    } else if (state && state.settings && !state.settings.tracking) {
+      text.textContent = 'Recording is paused.';
+    } else {
+      text.textContent = 'No closed Incognito tabs yet. Tabs and windows you close (or lose when Chrome quits) show up here.';
+    }
+    li.append(icon, text);
+    els.closedList.appendChild(li);
+    return;
+  }
+
+  const fragment = document.createDocumentFragment();
+  closedRecords.forEach((record) => {
+    if (record.kind === 'tab') {
+      const tab = record.windows[0].tabs[0];
+      fragment.appendChild(closedTabRow(tab, record.closedAt, () => reopen({ id: record.id })));
+    } else {
+      fragment.appendChild(closedGroup(record));
+    }
+  });
+  els.closedList.appendChild(fragment);
+}
+
+async function refreshClosed() {
+  try {
+    const { records } = await send('getClosed');
+    closedRecords = records;
+    renderClosed();
+  } catch (err) {
+    toast(err.message, 'err');
+  }
+}
+
+function selectTab(tab, focus = false) {
+  els.tabs.forEach((t) => {
+    const selected = t === tab;
+    t.setAttribute('aria-selected', String(selected));
+    t.tabIndex = selected ? 0 : -1;
+    document.getElementById(t.getAttribute('aria-controls')).hidden = !selected;
+  });
+  if (focus) tab.focus();
+}
+
+async function showShortcut() {
+  try {
+    const commands = await chrome.commands.getAll();
+    const cmd = commands.find((c) => c.name === 'reopen-last-closed');
+    els.shortcutHint.textContent = cmd && cmd.shortcut ? cmd.shortcut : '';
+    els.shortcutHint.title = cmd && cmd.shortcut
+      ? 'Keyboard shortcut (change it at chrome://extensions/shortcuts)'
+      : '';
+  } catch {
+    els.shortcutHint.textContent = '';
+  }
+}
+
 async function refresh() {
   try {
     const [nextState, recent] = await Promise.all([
@@ -253,6 +451,7 @@ async function refresh() {
     entries = recent.entries;
     renderHeader();
     renderList();
+    refreshClosed();
   } catch (err) {
     els.statusLine.textContent = 'Service worker unavailable';
     els.statusLine.className = 'badge badge--danger';
@@ -327,9 +526,34 @@ els.openExtensionsPage.addEventListener('click', async () => {
   }
 });
 
+// Tab bar: click, or Left/Right arrows when a tab has focus.
+els.tabs.forEach((tab, i) => {
+  tab.addEventListener('click', () => selectTab(tab));
+  tab.addEventListener('keydown', (event) => {
+    if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
+    event.preventDefault();
+    const step = event.key === 'ArrowRight' ? 1 : -1;
+    selectTab(els.tabs[(i + step + els.tabs.length) % els.tabs.length], true);
+  });
+});
+
+els.reopenLast.addEventListener('click', () => reopen({}));
+
+els.clearClosed.addEventListener('click', async () => {
+  try {
+    await send('clearClosed');
+    toast('Recently closed list cleared');
+  } catch (err) {
+    toast(err.message, 'err');
+  }
+});
+
 // Live updates while the popup is open (e.g. a new page loads in Incognito).
 chrome.storage.onChanged.addListener((changes, area) => {
-  if (area === 'local' && (changes.history || changes.settings)) refresh();
+  if (area !== 'local') return;
+  if (changes.history || changes.settings) refresh();
+  else if (changes.recentlyClosed) refreshClosed();
 });
 
 refresh();
+showShortcut();

@@ -39,20 +39,37 @@
     </div>
   </div>
 
-  <div class="pop-stats">
-    <div class="pop-stat"><b id="statTotal">0</b><span>Stored</span></div>
-    <div class="pop-stat"><b id="stat24h">0</b><span>24 hours</span></div>
-    <div class="pop-stat"><b id="statSites">0</b><span>Sites</span></div>
-  </div>
+  <nav class="tabs pop-tabs" role="tablist" aria-label="Popup views">
+    <button class="tab" role="tab" id="tab-history" aria-controls="view-history" aria-selected="true" type="button">History</button>
+    <button class="tab" role="tab" id="tab-closed" aria-controls="view-closed" aria-selected="false" tabindex="-1" type="button">Recently closed <span class="badge badge--flat" id="closedCount" hidden>0</span></button>
+  </nav>
 
-  <div class="pop-section">
-    <div class="search-inline">
-      <input type="search" id="search" placeholder="Filter recent visits&hellip;" autocomplete="off" spellcheck="false" />
-      <button class="icon-btn" id="clearSearch" type="button" title="Clear filter" hidden>&times;</button>
+  <section class="pop-view" id="view-history" role="tabpanel" aria-labelledby="tab-history">
+    <div class="pop-stats">
+      <div class="pop-stat"><b id="statTotal">0</b><span>Stored</span></div>
+      <div class="pop-stat"><b id="stat24h">0</b><span>24 hours</span></div>
+      <div class="pop-stat"><b id="statSites">0</b><span>Sites</span></div>
     </div>
-  </div>
 
-  <ul class="entry-list" id="list" aria-label="Recent Incognito visits"></ul>
+    <div class="pop-section">
+      <div class="search-inline">
+        <input type="search" id="search" placeholder="Filter recent visits&hellip;" autocomplete="off" spellcheck="false" />
+        <button class="icon-btn" id="clearSearch" type="button" title="Clear filter" hidden>&times;</button>
+      </div>
+    </div>
+
+    <ul class="entry-list" id="list" aria-label="Recent Incognito visits"></ul>
+  </section>
+
+  <section class="pop-view" id="view-closed" role="tabpanel" aria-labelledby="tab-closed" hidden>
+    <div class="pop-section closed-actions">
+      <button class="btn btn--primary btn--sm" id="reopenLast" type="button" title="Reopen the most recently closed tab or window">&#8634; Reopen last closed</button>
+      <button class="btn btn--ghost btn--sm" id="clearClosed" type="button" title="Forget the recently closed list">Clear list</button>
+      <span class="closed-hint" id="shortcutHint"></span>
+    </div>
+
+    <ul class="entry-list" id="closedList" aria-label="Recently closed Incognito tabs and windows"></ul>
+  </section>
 
   <footer class="pop-foot">
     <button class="btn btn--danger btn--sm" id="wipe" type="button" title="Delete every stored entry">Clear data</button>

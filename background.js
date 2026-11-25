@@ -51,6 +51,13 @@ const PURGE_ALARM = 'retention-purge';
 const DEDUPE_WINDOW_MS = 1500;
 const MAX_SPANS = 2000;
 
+/* Recently closed (v1.0.1) ------------------------------------------------- */
+const CLOSED_KEY = 'recentlyClosed';   // storage.local: closed tab/window/session records, newest first
+const OPEN_TABS_KEY = 'openTabs';      // storage.local: snapshot of open Incognito tabs (survives Cmd+Q)
+const RUN_MARKER_KEY = 'browserRun';   // storage.session: present = snapshot already reconciled this run
+const MAX_CLOSED = 50;
+const WINDOW_GROUP_MS = 10000;         // tabs of one closing window are grouped into one record
+
 /* -------------------------------------------------------------------------- */
 /* storage helpers                                                            */
 /* -------------------------------------------------------------------------- */
@@ -92,6 +99,21 @@ async function getTabState() {
 
 function setTabState(state) {
   return chrome.storage.session.set({ [SESSION_TABS_KEY]: state });
+}
+
+async function getClosed() {
+  const stored = await chrome.storage.local.get(CLOSED_KEY);
+  return Array.isArray(stored[CLOSED_KEY]) ? stored[CLOSED_KEY] : [];
+}
+
+async function getOpenTabs() {
+  const stored = await chrome.storage.local.get(OPEN_TABS_KEY);
+  const snap = stored[OPEN_TABS_KEY];
+  return snap && typeof snap === 'object' && snap.tabs ? snap : { tabs: {}, savedAt: 0 };
+}
+
+function setOpenTabs(tabs) {
+  return chrome.storage.local.set({ [OPEN_TABS_KEY]: { tabs, savedAt: Date.now() } });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -302,6 +324,216 @@ async function closeTab(tabId) {
 }
 
 /* -------------------------------------------------------------------------- */
+/* recently closed tabs / windows (v1.0.1)                                    */
+/* -------------------------------------------------------------------------- */
+
+/*
+ * Chrome forgets closed Incognito tabs as soon as the last Incognito window
+ * goes away, and chrome.sessions does not help after a quit. So we keep our
+ * own snapshot of every open Incognito tab in chrome.storage.local:
+ *
+ *  - tabs.onRemoved moves a tab from the snapshot into the closed list.
+ *    Tabs closed together with their window are grouped into one record.
+ *  - When the browser quits (Cmd+Q) onRemoved is often never delivered, so
+ *    whatever is still in the snapshot at the next browser start becomes one
+ *    "session" record that restores every window.
+ *
+ * Record shape: { id, kind: 'tab' | 'window' | 'session', closedAt,
+ *                 windows: [{ windowId, tabs: [{ url, title, domain, index }] }] }
+ */
+
+function tabUrl(tab) {
+  return tab.url || tab.pendingUrl || '';
+}
+
+function snapshotEntry(tab) {
+  return {
+    tabId: tab.id,
+    windowId: tab.windowId,
+    index: tab.index,
+    url: tabUrl(tab),
+    title: tab.title || '',
+    domain: domainOf(tabUrl(tab))
+  };
+}
+
+function closedTabFrom(entry) {
+  return { url: entry.url, title: entry.title || '', domain: entry.domain || domainOf(entry.url), index: entry.index || 0 };
+}
+
+async function queryIncognitoTabs() {
+  try {
+    const tabs = await chrome.tabs.query({});
+    return tabs.filter((t) => t.incognito === true);
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Refreshes the snapshot from the live tab list. NOT queued: call it from
+ * inside an enqueue() task (or through scheduleSnapshot()).
+ *
+ * Tabs missing from the live list are kept on purpose: their onRemoved event
+ * may still be waiting in the queue, and it needs the entry to record them.
+ */
+async function rebuildSnapshotNow() {
+  const settings = await getSettings();
+  if (!settings.tracking) {
+    await setOpenTabs({});
+    return;
+  }
+  const [snap, live] = await Promise.all([getOpenTabs(), queryIncognitoTabs()]);
+  const next = { ...snap.tabs };
+  live.forEach((tab) => {
+    if (isTrackableUrl(tabUrl(tab))) next[String(tab.id)] = snapshotEntry(tab);
+    else delete next[String(tab.id)];
+  });
+  await setOpenTabs(next);
+}
+
+function scheduleSnapshot() {
+  return enqueue(rebuildSnapshotNow);
+}
+
+function pushClosed(closed, record) {
+  closed.unshift(record);
+  if (closed.length > MAX_CLOSED) closed.length = MAX_CLOSED;
+}
+
+/** A tab was closed: move it from the snapshot to the closed list. */
+function recordClosedTab(tabId, removeInfo = {}) {
+  return enqueue(async () => {
+    const snap = await getOpenTabs();
+    const key = String(tabId);
+    const entry = snap.tabs[key];
+    if (!entry) return;
+    delete snap.tabs[key];
+
+    const settings = await getSettings();
+    if (!settings.tracking) {
+      await setOpenTabs(snap.tabs);
+      return;
+    }
+
+    const now = Date.now();
+    const closed = await getClosed();
+    const tab = closedTabFrom(entry);
+    const windowId = typeof removeInfo.windowId === 'number' ? removeInfo.windowId : entry.windowId;
+
+    if (removeInfo.isWindowClosing) {
+      const group = closed.find((r) => r.kind === 'window'
+        && r.windows[0].windowId === windowId
+        && now - r.closedAt < WINDOW_GROUP_MS);
+      if (group) {
+        group.windows[0].tabs.push(tab);
+        group.windows[0].tabs.sort((a, b) => a.index - b.index);
+      } else {
+        pushClosed(closed, { id: makeId(), kind: 'window', closedAt: now, windows: [{ windowId, tabs: [tab] }] });
+      }
+    } else {
+      pushClosed(closed, { id: makeId(), kind: 'tab', closedAt: now, windows: [{ windowId, tabs: [tab] }] });
+    }
+
+    await chrome.storage.local.set({ [CLOSED_KEY]: closed, [OPEN_TABS_KEY]: { tabs: snap.tabs, savedAt: now } });
+  });
+}
+
+/**
+ * Runs once per worker start, before any other queued work. If this is the
+ * first start of a browser run (storage.session is empty after a restart),
+ * tabs left in the snapshot that are not open any more were lost to a quit
+ * or crash: save them as one "session" record.
+ */
+function initClosedTracking() {
+  return enqueue(async () => {
+    const marker = await chrome.storage.session.get(RUN_MARKER_KEY);
+    if (!marker[RUN_MARKER_KEY]) {
+      const [snap, live, settings] = await Promise.all([getOpenTabs(), queryIncognitoTabs(), getSettings()]);
+      const stillOpen = new Set(live.map((t) => `${t.id}|${tabUrl(t)}`));
+      const leftovers = Object.values(snap.tabs).filter((e) => !stillOpen.has(`${e.tabId}|${e.url}`));
+
+      if (leftovers.length && settings.tracking) {
+        const byWindow = new Map();
+        leftovers.forEach((e) => {
+          if (!byWindow.has(e.windowId)) byWindow.set(e.windowId, []);
+          byWindow.get(e.windowId).push(closedTabFrom(e));
+        });
+        const windows = [...byWindow.entries()].map(([windowId, tabs]) => ({
+          windowId,
+          tabs: tabs.sort((a, b) => a.index - b.index)
+        }));
+        const closed = await getClosed();
+        pushClosed(closed, { id: makeId(), kind: 'session', closedAt: snap.savedAt || Date.now(), windows });
+        await chrome.storage.local.set({ [CLOSED_KEY]: closed });
+      }
+
+      // Start this run from the live tabs only.
+      await setOpenTabs({});
+      await chrome.storage.session.set({ [RUN_MARKER_KEY]: Date.now() });
+    }
+    await rebuildSnapshotNow();
+  });
+}
+
+/** Opens one tab in Incognito: its old window if still open, else any Incognito window, else a new one. */
+async function reopenTab(tab, windowId) {
+  const windows = await chrome.windows.getAll({ windowTypes: ['normal'] });
+  const incognito = windows.filter((w) => w.incognito);
+  const original = incognito.find((w) => w.id === windowId);
+  const target = original || incognito.find((w) => w.focused) || incognito[0];
+  if (target) {
+    const props = { windowId: target.id, url: tab.url, active: true };
+    if (original && typeof tab.index === 'number') props.index = tab.index;
+    await chrome.tabs.create(props);
+    await chrome.windows.update(target.id, { focused: true });
+  } else {
+    await chrome.windows.create({ url: tab.url, incognito: true, focused: true });
+  }
+}
+
+async function reopenRecord(record) {
+  if (record.kind === 'tab') {
+    await reopenTab(record.windows[0].tabs[0], record.windows[0].windowId);
+    return;
+  }
+  for (const win of record.windows) {
+    const urls = win.tabs.map((t) => t.url).filter(Boolean);
+    if (urls.length) await chrome.windows.create({ url: urls, incognito: true, focused: true });
+  }
+}
+
+/**
+ * Restores a closed record (or a single tab of a window/session record when
+ * windowIndex + tabIndex are given) and removes what was restored from the list.
+ */
+function reopenClosed({ id, windowIndex, tabIndex } = {}) {
+  return enqueue(async () => {
+    const closed = await getClosed();
+    const at = id ? closed.findIndex((r) => r.id === id) : 0;
+    const record = closed[at];
+    if (!record) throw new Error(id ? 'That item was already reopened or removed.' : 'Nothing to reopen.');
+
+    const single = typeof windowIndex === 'number' && typeof tabIndex === 'number';
+    if (single) {
+      const win = record.windows[windowIndex];
+      const tab = win && win.tabs[tabIndex];
+      if (!tab) throw new Error('That tab was already reopened.');
+      await reopenTab(tab, win.windowId);
+      win.tabs.splice(tabIndex, 1);
+      if (!win.tabs.length) record.windows.splice(windowIndex, 1);
+      if (!record.windows.length) closed.splice(at, 1);
+    } else {
+      await reopenRecord(record);
+      closed.splice(at, 1);
+    }
+
+    await chrome.storage.local.set({ [CLOSED_KEY]: closed });
+    return { remaining: closed.length };
+  });
+}
+
+/* -------------------------------------------------------------------------- */
 /* retention                                                                  */
 /* -------------------------------------------------------------------------- */
 
@@ -321,6 +553,10 @@ async function applyRetention() {
       await chrome.storage.local.set({ [LOG_KEY]: keptLog, [SPANS_KEY]: keptSpans });
       await refreshBadge(keptLog);
     }
+
+    const closed = await getClosed();
+    const keptClosed = closed.filter((r) => r.closedAt >= cutoff);
+    if (keptClosed.length !== closed.length) await chrome.storage.local.set({ [CLOSED_KEY]: keptClosed });
     return { removed };
   });
 }
@@ -373,8 +609,9 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   enrichLatest(tabId, { title: changeInfo.title, favIconUrl: changeInfo.favIconUrl });
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => {
+chrome.tabs.onRemoved.addListener((tabId, removeInfo) => {
   closeTab(tabId);
+  recordClosedTab(tabId, removeInfo);
 });
 
 // Replaced tabs (prerender/back-forward cache swaps) keep browsing alive under
@@ -388,6 +625,31 @@ chrome.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
     delete tabState[String(removedTabId)];
     await setTabState(tabState);
   });
+  // The old id never closes from the user's point of view: drop it silently.
+  enqueue(async () => {
+    const snap = await getOpenTabs();
+    delete snap.tabs[String(removedTabId)];
+    await setOpenTabs(snap.tabs);
+    await rebuildSnapshotNow();
+  });
+});
+
+// Keep the open-tab snapshot (used by "Recently closed") current.
+chrome.tabs.onCreated.addListener((tab) => {
+  if (tab && tab.incognito === true) scheduleSnapshot();
+});
+chrome.tabs.onUpdated.addListener((_tabId, changeInfo, tab) => {
+  if (!tab || tab.incognito !== true) return;
+  if (changeInfo.url || changeInfo.title) scheduleSnapshot();
+});
+chrome.tabs.onMoved.addListener(() => scheduleSnapshot());
+chrome.tabs.onAttached.addListener(() => scheduleSnapshot());
+
+// Keyboard shortcut (see "commands" in manifest.json).
+chrome.commands.onCommand.addListener((command) => {
+  if (command === 'reopen-last-closed') {
+    reopenClosed({}).catch((err) => console.warn('[vault] reopen skipped', err));
+  }
 });
 
 chrome.alarms.onAlarm.addListener((alarm) => {
@@ -458,6 +720,7 @@ const handlers = {
     const settings = { ...(await getSettings()), ...(patch || {}) };
     await chrome.storage.local.set({ [SETTINGS_KEY]: settings });
     if (patch && 'retention' in patch) await applyRetention();
+    if (patch && 'tracking' in patch) await scheduleSnapshot();
     return { settings };
   },
 
@@ -477,7 +740,8 @@ const handlers = {
       const [log, spans] = await Promise.all([getLog(), getSpans()]);
       const kept = log.filter((e) => e.ts >= ts);
       const keptSpans = spans.filter((s) => s.endedAt >= ts);
-      await chrome.storage.local.set({ [LOG_KEY]: kept, [SPANS_KEY]: keptSpans });
+      const keptClosed = (await getClosed()).filter((r) => r.closedAt >= ts);
+      await chrome.storage.local.set({ [LOG_KEY]: kept, [SPANS_KEY]: keptSpans, [CLOSED_KEY]: keptClosed });
       await refreshBadge(kept);
       return { removed: log.length - kept.length };
     });
@@ -495,6 +759,26 @@ const handlers = {
       await chrome.storage.session.remove(SESSION_TABS_KEY);
       if (keepSettings) await chrome.storage.local.set({ [SETTINGS_KEY]: settings });
       await refreshBadge([]);
+      // The closed list is gone; re-learn the tabs that are open right now.
+      await rebuildSnapshotNow();
+      return { ok: true };
+    });
+  },
+
+  /* ---- recently closed (v1.0.1) ---- */
+
+  async getClosed() {
+    return { records: await getClosed() };
+  },
+
+  /** { id } restores a record; { id, windowIndex, tabIndex } one tab of it; {} the newest record. */
+  async reopenClosed(payload) {
+    return reopenClosed(payload);
+  },
+
+  async clearClosed() {
+    return enqueue(async () => {
+      await chrome.storage.local.set({ [CLOSED_KEY]: [] });
       return { ok: true };
     });
   }
@@ -515,3 +799,4 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
 // Cold-start housekeeping (the worker also spins up on plain events).
 ensureAlarm();
 refreshBadge();
+initClosedTracking();
